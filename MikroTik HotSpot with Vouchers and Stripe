@@ -1,0 +1,142 @@
+# MikroTik HotSpot with Vouchers and Stripe | Admin & Reseller Portal
+
+The dedicated server port makes the design easy to understand in the video. In a real deployment, the same segments can be implemented using separate VLANs on managed switches and APs.
+
+## 2. Wi-Fi Access Point
+
+In the lab, the AP is a USB Wi-Fi adapter controlled by `hostapd` on the PNETLab VM. Its SSID is **`Hotspot-Lab`**, open, operating on the 2.4 GHz band on channel 6. The `wlan0` radio interface is bridged to the virtual network connected to `ether2` on the MikroTik.
+
+Example AP configuration used in the lab:
+
+```ini
+interface=wlan0
+bridge=vnet3_2
+driver=nl80211
+ssid=Hotspot-Lab
+hw_mode=g
+channel=6
+wmm_enabled=1
+
+The AP does not provide DHCP, NAT, captive portal, or voucher management. Phones receive their IP address, gateway, and DNS from the MikroTik.
+To replace the USB adapter with a physical AP, connect its uplink to the guest network on ether2, or to the corresponding VLAN, and keep the AP in bridge mode.
+In production, it is recommended to isolate Wi-Fi clients from each other and separate AP management traffic from the guest network.
+The USB adapter used in the lab operates using 802.11g. It is suitable for demonstrating the workflow, but not for demonstrating the performance of a 100 Mbps service.
+3. IP Addresses, DHCP and Internet Access on the MikroTik
+Under IP → Addresses, the following addresses are configured:
+- 10.20.0.1/24 on ether2
+- 10.30.0.1/24 on ether3
+- 192.168.0.45/24 on ether1 as the WAN interface
+Under IP → Pool, the guest address pool is:
+10.20.0.10–10.20.0.200
+Under IP → DHCP Server, the hotspot-dhcp server operates on ether2 with a one-hour lease time.
+The 10.20.0.0/24 DHCP network advertises 10.20.0.1 as both gateway and DNS server.
+The Linux server is located at:
+10.30.0.2
+on the ether3 network.
+Under IP → Firewall → NAT, a masquerade rule on ether1 allows authorized clients to access the Internet.
+The dynamic rules created by the HotSpot intercept DNS requests and HTTP requests from guests that have not yet authenticated. These rules should be recognized as HotSpot-generated rules and should not be manually modified as if they were normal static firewall rules.
+4. HotSpot and Splash Page
+Under IP → HotSpot, the hotspot1 server is active on ether2, using the guest address pool and the hsprof profile.
+The following settings are configured in the profile:
+- HotSpot address 10.20.0.1 and local DNS name wifi.lab
+- Custom HTML pages stored in the MikroTik hotspot directory
+- Authentication using http-chap and cookies
+- RADIUS authentication and accounting enabled, with periodic session updates
+When a phone connects to the SSID, it receives a 10.20.0.x IP address.
+The operating system's captive portal connectivity check is intercepted and redirected to:
+http://wifi.lab/login
+The MikroTik login.html page displays the Voucher code field and, for a new customer, opens the plans page on the Linux server:
+https://192.168.0.45:8443/buy
+The HotSpot page remains the point where the voucher code is submitted to the MikroTik to authenticate the client.
+The Linux portal handles:
+- Plan management
+- Payments
+- Voucher creation
+- Administration interfaces
+This separation keeps payment-related logic away from the router.
+5. Accessing the Portal Before Authentication
+A customer without a voucher must be able to access the portal and complete the payment process, but must not have general Internet access.
+For this reason, under IP → HotSpot → Walled Garden, HTTPS access to the portal on port 8443 and the HTTPS hosts required by Stripe Checkout are allowed.
+The lab contains rules for:
+- 192.168.0.45:8443
+- 10.30.0.2:8443
+- Stripe domains required by the payment page
+Under IP → Firewall → NAT, traffic destined for 192.168.0.45:8443 is forwarded to 10.30.0.2:8443.
+The portal can therefore be accessed from the upstream network and from Wi-Fi guests, while the application itself remains installed only on Ubuntu.
+Walled Garden rules should be reviewed whenever the payment workflow or the hosts required by the payment provider change. A static list of IP addresses is not a reliable foundation for distributed services.
+6. User Manager/RADIUS: Vouchers, Duration and Speed Limits
+User Manager is enabled on the MikroTik as the RADIUS server for the HotSpot.
+The portal creates a User Manager user after payment confirmation, or when requested by an administrator/reseller.
+For new vouchers, the code displayed to the customer is internally used as both the username and password, allowing the customer to enter a single code.
+Under User Manager → Profiles, there are three profiles.
+Validity starts at the first authentication using:
+starts-when=first-auth
+Under Limitations, the maximum duration and speed limits are defined.
+Under Profile Limitations, each profile is linked to its corresponding limitation:
+Lab Plan	Profile	Limitation	Validity	Client Download	Client Upload
+1 hour	plan-1h	lim-1h	1 hour	5 Mbps	1 Mbps
+1 day	plan-1d	lim-1d	1 day	5 Mbps	2 Mbps
+7 days	plan-7d	lim-7d	7 days	100 Mbps	20 Mbps
+
+
+In MikroTik limitation terminology, RX is the client's upload and TX is the client's download.
+The limit is applied by the router to HotSpot sessions.
+The admin portal allows the administrator to change:
+- Plan name
+- Duration
+- Price
+- Download speed
+- Upload speed
+When speed or duration settings are saved, the portal updates the corresponding MikroTik profile/limitation through RouterOS REST over HTTPS.
+A client that is already online keeps the current queue until it reconnects.
+Vouchers belonging to the same plan share the same profile. The current portal does not provide customized bandwidth limits for individual vouchers.
+The In use now status shown by the portal is based on the current sessions under:
+IP → HotSpot → Active
+Issued, enabled, disabled, or deleted vouchers remain tracked in the portal database.
+7. Complete Customer Workflow
+1. The phone connects to Hotspot-Lab and receives a 10.20.0.x address through DHCP.
+2. The phone's captive portal detection reaches wifi.lab/login; the HotSpot page directs the new customer to the available plans.
+3. The customer selects a plan and completes the Stripe Checkout process on the Linux server. In the lab, the payment is test-only.
+4. The server verifies the payment result before creating the voucher in User Manager.
+5. The customer receives the voucher code. From the guest network, the portal can automatically return the customer to the HotSpot login page with the voucher code already populated.
+6. The MikroTik authenticates the voucher through RADIUS, applies the configured duration and bandwidth limits, and allows Internet access.
+After authentication, the browser is redirected to:
+https://crazynet.io/
+8. Quick Checks for the Technician
+What to Check	Where / Expected Result
+Wi-Fi association	The phone sees Hotspot-Lab and connects to the AP.
+DHCP	Under IP → DHCP Server → Leases, a client appears with a 10.20.0.x address; gateway and DNS are 10.20.0.1.
+Captive portal detection	An HTTP request from a new client is redirected to wifi.lab/login and then to the plans page.
+Portal before login	/buy is accessible without a voucher; general Internet access remains blocked.
+Voucher	The user appears in User Manager with the profile corresponding to the selected plan.
+Online session	The client appears under IP → HotSpot → Active and as In use in the portal.
+Speed	Check the User Manager limitation and the dynamic queue under Queues → Simple Queues. Changing a plan requires already-connected clients to reconnect.
+
+
+A test was repeated in the lab using a temporary guest client.
+DHCP and DNS responded correctly, the captive portal detection received the redirect to wifi.lab/login, and the plans page was accessible before authentication.
+9. What Should Be Changed Before Selling It as a Public Service
+- Use an AP and wired network sized according to the number of clients and the advertised bandwidth. Configuring a 100/20 Mbps limit does not guarantee that throughput; the virtual path used in this lab showed significantly lower performance.
+- Give the portal a proper domain name and a trusted HTTPS certificate. The certificate used in the lab is self-signed and may generate a security warning on the customer's phone.
+- Move from Stripe Sandbox to live credentials and use a protected public webhook endpoint, verifying the payment before issuing the voucher.
+- Separate guests, servers, and management traffic using firewalls/VLANs.
+- Restrict Winbox, SSH, and router APIs to administrative addresses or VPN access.
+- Disable unnecessary RouterOS services.
+- Protect and back up the database and configuration files.
+- Implement proper update, logging, monitoring, and recovery procedures.
+Conclusion
+This documentation describes the configuration observed in the lab and the steps required to make it suitable for deployment.
+The solution combines:
+- MikroTik HotSpot
+- Wi-Fi access point
+- Captive portal
+- User Manager / RADIUS
+- Wi-Fi vouchers
+- Stripe payments
+- Linux server
+- Admin portal
+- Reseller portal
+- RouterOS REST API
+- DHCP and NAT
+- Bandwidth management
+IP addresses, VLANs, domains, and plan names must be adapted to the customer's production environment.
